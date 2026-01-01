@@ -39,34 +39,99 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  Map<String, dynamic> _images = {};
+  // photos returned from the API (appended as we paginate)
+  List<dynamic> _photos = [];
   String _query = '';
   Timer? _debounce;
+
+  // pagination & loading state
+  final ScrollController _scrollController = ScrollController();
+  int _page = 1;
+  final int _perPage = 5;
+  bool _isLoading = false;
+  bool _hasMore = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(() {
+      // when the user scrolls near the bottom, try loading next page
+      if (_scrollController.position.pixels >=
+          _scrollController.position.maxScrollExtent - 200) {
+        if (!_isLoading && _hasMore) {
+          fetchData();
+        }
+      }
+    });
+  }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
-  void fetchData() async {
+  // Fetch one page of results and append them to _photos. When page==1 we
+  // replace the results (used for new searches).
+  Future<void> fetchData() async {
+    final trimmed = _query.trim();
+    if (trimmed.isEmpty) {
+      setState(() {
+        _photos = [];
+        _hasMore = true;
+        _page = 1;
+      });
+      return;
+    }
+
+    if (_isLoading) return;
+    _isLoading = true;
+
+    // Leaving this here for demo purposes
     final apiKey = '9TFgGLiRjlVExyhQBHmhdkruSkFUoa87w1SlwbuhRRAzGHDhYdq7auea';
-
-    final httpPackageUrl = Uri.https('api.pexels.com', 'v1/search', {
-      'query': _query,
-      'per_page': '5',
+    final uri = Uri.https('api.pexels.com', '/v1/search', {
+      'query': trimmed,
+      'per_page': '$_perPage',
+      'page': '$_page',
     });
-    final httpPackageInfo = await http.read(
-      httpPackageUrl,
-      headers: {'Authorization': apiKey},
-    );
-    final httpPackageJson =
-        json.decode(httpPackageInfo) as Map<String, dynamic>;
-    print(httpPackageJson);
 
-    setState(() {
-      _images = httpPackageJson;
-    });
+    try {
+      final response = await http.get(uri, headers: {'Authorization': apiKey});
+      if (response.statusCode == 200) {
+        final Map<String, dynamic> data =
+            json.decode(response.body) as Map<String, dynamic>;
+        final List<dynamic> fetched = data['photos'] ?? [];
+
+        setState(() {
+          if (_page == 1) {
+            _photos = fetched;
+          } else {
+            _photos.addAll(fetched);
+          }
+
+          // If we received fewer than requested, there are no more pages.
+          if (fetched.length < _perPage) {
+            _hasMore = false;
+          } else {
+            _page += 1;
+          }
+        });
+      } else {
+        // non-200
+        print('Request failed (${response.statusCode}): ${response.body}');
+        setState(() {
+          _hasMore = false;
+        });
+      }
+    } catch (e) {
+      print('Error fetching images: $e');
+      setState(() {
+        _hasMore = false;
+      });
+    } finally {
+      _isLoading = false;
+    }
   }
 
   @override
@@ -96,8 +161,16 @@ class _MyHomePageState extends State<MyHomePage> {
                   labelText: 'Search query',
                 ),
                 onChanged: (value) {
-                  _query = value;
+                  // clear previous results immediately when the query changes
+                  // and reset pagination; wait 3s of inactivity before fetching
                   _debounce?.cancel();
+                  setState(() {
+                    _query = value;
+                    _photos = [];
+                    _hasMore = true;
+                    _page = 1;
+                  });
+
                   _debounce = Timer(const Duration(milliseconds: 600), () {
                     if (!mounted) return;
                     fetchData();
@@ -107,16 +180,27 @@ class _MyHomePageState extends State<MyHomePage> {
             ),
             const SizedBox(height: 12),
 
-            // show images in a list
+            // show images in a list with infinite scroll
             Expanded(
               child: ListView.separated(
+                controller: _scrollController,
                 padding: const EdgeInsets.symmetric(vertical: 12),
-                itemCount: _images['photos']?.length ?? 0,
+                // include an extra item for the loading indicator when more pages exist
+                itemCount: _photos.length + (_hasMore && _isLoading ? 1 : 0),
                 itemBuilder: (context, index) {
-                  final photo = _images['photos'][index];
-                  return Image.network(photo['src']['medium']);
+                  if (index < _photos.length) {
+                    final photo = _photos[index];
+                    return Image.network(photo['src']['medium']);
+                  }
+
+                  // loading indicator row
+                  return const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Center(child: CircularProgressIndicator()),
+                  );
                 },
-                separatorBuilder: (context, index) => const SizedBox(),
+                separatorBuilder: (context, index) =>
+                    const SizedBox(height: 12),
               ),
             ),
           ],
